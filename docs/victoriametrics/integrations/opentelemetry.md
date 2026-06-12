@@ -8,10 +8,43 @@ menu:
     weight: 13
 ---
 
-VictoriaMetrics supports data ingestion via [OpenTelemetry protocol (OTLP) for metrics](https://github.com/open-telemetry/opentelemetry-specification/blob/97c826b70e2f89cfdf655d5150791f3f0c2bae19/specification/metrics/data-model.md) at `/opentelemetry/v1/metrics` path.
-It expects `protobuf`-encoded requests at `/opentelemetry/v1/metrics`. For gzip-compressed workload set HTTP request header `Content-Encoding: gzip`.
+VictoriaMetrics supports data ingestion via [OpenTelemetry protocol (OTLP) for metrics](https://github.com/open-telemetry/opentelemetry-specification/blob/97c826b70e2f89cfdf655d5150791f3f0c2bae19/specification/metrics/data-model.md) over HTTP and gRPC.
+
+## OTLP/HTTP
+
+VictoriaMetrics expects `protobuf`-encoded OTLP/HTTP requests at `/opentelemetry/v1/metrics`. For gzip-compressed workload set HTTP request header `Content-Encoding: gzip`.
 
 See how to configure [OpenTelemetry Collector](https://docs.victoriametrics.com/victoriametrics/data-ingestion/opentelemetry-collector/) to push metrics to VictoriaMetrics.
+
+## OTLP/gRPC
+
+VictoriaMetrics supports OTLP/gRPC metrics ingestion for single-node VictoriaMetrics, `vmagent`, and `vminsert` in VictoriaMetrics cluster {{% available_from "#" %}} when `-otlpGRPCListenAddr` is set. The recommended listen address is `:4317`.
+
+The listener accepts OTLP/gRPC requests for the `/opentelemetry.proto.collector.metrics.v1.MetricsService/Export` gRPC method.
+
+For single-node VictoriaMetrics and `vmagent`, set the listener on the target process:
+
+```sh
+-otlpGRPCListenAddr=:4317
+```
+
+For VictoriaMetrics cluster, set the listener on `vminsert`:
+
+```sh
+vminsert -otlpGRPCListenAddr=:4317 ...
+```
+
+The OTLP exporter endpoint should point to this listener, for example:
+
+```yaml
+exporters:
+  otlp:
+    endpoint: victoriametrics:4317
+    tls:
+      insecure: true
+```
+
+Enable TLS for the OTLP/gRPC listener with `-otlpGRPC.tls`, `-otlpGRPC.tlsCertFile`, and `-otlpGRPC.tlsKeyFile`. The optional `-otlpGRPC.tlsMinVersion` and `-otlpGRPC.tlsCipherSuites` flags control accepted TLS versions and cipher suites. Clients using a non-TLS listener must use insecure transport.
 
 ## Label sanitization
 

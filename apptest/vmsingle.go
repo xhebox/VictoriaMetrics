@@ -19,6 +19,17 @@ func StartVmsingle(instance string, flags []string, cli *Client, output io.Write
 	if binary == "" {
 		binary = "../../bin/victoria-metrics-race"
 	}
+	extractREs := []*regexp.Regexp{
+		storageDataPathRE,
+		httpListenAddrRE,
+		graphiteListenAddrRE,
+		openTSDBListenAddrRE,
+	}
+	otlpGRPCListenAddrIdx := -1
+	if hasNonEmptyFlagValue(flags, "-otlpGRPCListenAddr") {
+		otlpGRPCListenAddrIdx = len(extractREs)
+		extractREs = append(extractREs, otlpGRPCListenAddrRE)
+	}
 	app, stderrExtracts, err := startApp(instance, binary, flags, &appOptions{
 		defaultFlags: map[string]string{
 			"-storageDataPath":    fmt.Sprintf("%s/%s-%d", os.TempDir(), instance, time.Now().UnixNano()),
@@ -26,31 +37,32 @@ func StartVmsingle(instance string, flags []string, cli *Client, output io.Write
 			"-graphiteListenAddr": "127.0.0.1:0",
 			"-opentsdbListenAddr": "127.0.0.1:0",
 		},
-		extractREs: []*regexp.Regexp{
-			storageDataPathRE,
-			httpListenAddrRE,
-			graphiteListenAddrRE,
-			openTSDBListenAddrRE,
-		},
-		output: output,
+		extractREs: extractREs,
+		output:     output,
 	})
 	if err != nil {
 		return nil, err
 	}
+	otlpGRPCMetricsAddr := ""
+	if otlpGRPCListenAddrIdx >= 0 {
+		otlpGRPCMetricsAddr = stderrExtracts[otlpGRPCListenAddrIdx]
+	}
 
 	return newVmsingle(app, cli, vmsingleRuntimeValues{
-		storageDataPath:    stderrExtracts[0],
-		httpListenAddr:     stderrExtracts[1],
-		graphiteListenAddr: stderrExtracts[2],
-		openTSDBListenAddr: stderrExtracts[3],
+		storageDataPath:     stderrExtracts[0],
+		httpListenAddr:      stderrExtracts[1],
+		graphiteListenAddr:  stderrExtracts[2],
+		openTSDBListenAddr:  stderrExtracts[3],
+		otlpGRPCMetricsAddr: otlpGRPCMetricsAddr,
 	}), nil
 }
 
 type vmsingleRuntimeValues struct {
-	storageDataPath    string
-	httpListenAddr     string
-	graphiteListenAddr string
-	openTSDBListenAddr string
+	storageDataPath     string
+	httpListenAddr      string
+	graphiteListenAddr  string
+	openTSDBListenAddr  string
+	otlpGRPCMetricsAddr string
 }
 
 func newVmsingle(app *app, cli *Client, rt vmsingleRuntimeValues) *Vmsingle {
@@ -77,7 +89,8 @@ func newVmsingle(app *app, cli *Client, rt vmsingleRuntimeValues) *Vmsingle {
 			openTSDBURL: func(_, path string, _ QueryOpts) string {
 				return fmt.Sprintf("http://%s/%s", rt.openTSDBListenAddr, path)
 			},
-			graphiteListenAddr: rt.graphiteListenAddr,
+			graphiteListenAddr:  rt.graphiteListenAddr,
+			otlpGRPCMetricsAddr: rt.otlpGRPCMetricsAddr,
 			sendBlocking: func(t *testing.T, _ int, send func()) {
 				t.Helper()
 				send()

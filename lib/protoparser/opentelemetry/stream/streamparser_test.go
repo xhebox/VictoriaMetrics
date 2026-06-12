@@ -2,6 +2,7 @@ package stream
 
 import (
 	"bytes"
+	"encoding/binary"
 	"fmt"
 	"io"
 	"reflect"
@@ -16,6 +17,7 @@ import (
 	"github.com/klauspost/compress/zstd"
 
 	"github.com/VictoriaMetrics/VictoriaMetrics/lib/fasttime"
+	vmgrpc "github.com/VictoriaMetrics/VictoriaMetrics/lib/grpc"
 	"github.com/VictoriaMetrics/VictoriaMetrics/lib/prompb"
 	"github.com/VictoriaMetrics/VictoriaMetrics/lib/promutil"
 	"github.com/VictoriaMetrics/VictoriaMetrics/lib/protoparser/opentelemetry/pb"
@@ -540,6 +542,107 @@ func TestParseStream(t *testing.T) {
 		)
 	}
 
+}
+
+func TestParseGRPCStreamCompressedFlagControlsEncoding(t *testing.T) {
+	req := &pb.MetricsData{
+		ResourceMetrics: []*pb.ResourceMetrics{
+			generateOTLPSamples([]*pb.Metric{generateGauge("grpc-gauge", "")}),
+		},
+	}
+	data := req.MarshalProtobuf(nil)
+
+	t.Run("uncompressed ignores grpc-encoding", func(t *testing.T) {
+		frame := vmgrpc.AppendMessageFrame(nil, data, false)
+		checkParseGRPCStream(t, frame, "unsupported-encoding")
+	})
+
+	t.Run("compressed uses grpc-encoding", func(t *testing.T) {
+		var bb bytes.Buffer
+		zw := gzip.NewWriter(&bb)
+		if _, err := zw.Write(data); err != nil {
+			t.Fatalf("cannot gzip data: %s", err)
+		}
+		if err := zw.Close(); err != nil {
+			t.Fatalf("cannot close gzip writer: %s", err)
+		}
+		frame := vmgrpc.AppendMessageFrame(nil, bb.Bytes(), true)
+		checkParseGRPCStream(t, frame, "gzip")
+	})
+
+	t.Run("compressed requires grpc-encoding", func(t *testing.T) {
+		frame := vmgrpc.AppendMessageFrame(nil, data, true)
+		err := ParseGRPCStream(bytes.NewReader(frame), "", func(tss []prompb.TimeSeries, mms []prompb.MetricMetadata) error {
+			return nil
+		})
+		if err == nil {
+			t.Fatalf("expecting non-nil error")
+		}
+		wantErr := "missing grpc-encoding header for compressed gRPC message"
+		if err.Error() != wantErr {
+			t.Fatalf("unexpected error; got %q; want %q", err, wantErr)
+		}
+	})
+}
+
+func TestParseGRPCStreamMessageLength(t *testing.T) {
+	req := &pb.MetricsData{
+		ResourceMetrics: []*pb.ResourceMetrics{
+			generateOTLPSamples([]*pb.Metric{generateGauge("grpc-gauge", "")}),
+		},
+	}
+	data := req.MarshalProtobuf(nil)
+
+	t.Run("short body", func(t *testing.T) {
+		frame := vmgrpc.AppendMessageFrame(nil, data, false)
+		binary.BigEndian.PutUint32(frame[1:vmgrpc.MessageHeaderSize], uint32(len(data)+1))
+		err := ParseGRPCStream(bytes.NewReader(frame), "", func(tss []prompb.TimeSeries, mms []prompb.MetricMetadata) error {
+			return nil
+		})
+		if err == nil {
+			t.Fatalf("expecting non-nil error")
+		}
+		wantErr := fmt.Sprintf("invalid gRPC message length: %d, actual length: %d", len(data)+1, len(data))
+		if err.Error() != wantErr {
+			t.Fatalf("unexpected error; got %q; want %q", err, wantErr)
+		}
+	})
+
+	t.Run("trailing bytes are left unread", func(t *testing.T) {
+		frame := vmgrpc.AppendMessageFrame(nil, data, false)
+		frame = append(frame, 1)
+		br := bytes.NewReader(frame)
+		if err := ParseGRPCStream(br, "", func(tss []prompb.TimeSeries, mms []prompb.MetricMetadata) error {
+			return nil
+		}); err != nil {
+			t.Fatalf("unexpected error: %s", err)
+		}
+		tail, err := io.ReadAll(br)
+		if err != nil {
+			t.Fatalf("cannot read trailing bytes: %s", err)
+		}
+		if !bytes.Equal(tail, []byte{1}) {
+			t.Fatalf("unexpected trailing bytes; got %v; want %v", tail, []byte{1})
+		}
+	})
+}
+func checkParseGRPCStream(t *testing.T, frame []byte, encoding string) {
+	t.Helper()
+	var rowsCount, metadataCount int
+	err := ParseGRPCStream(bytes.NewReader(frame), encoding, func(tss []prompb.TimeSeries, mms []prompb.MetricMetadata) error {
+		rowsCount += len(tss)
+		metadataCount += len(mms)
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("cannot parse OTLP/gRPC stream: %s", err)
+	}
+	if rowsCount != 1 {
+		t.Fatalf("unexpected rows count; got %d; want 1", rowsCount)
+	}
+	if metadataCount != 1 {
+		t.Fatalf("unexpected metadata count; got %d; want 1", metadataCount)
+	}
 }
 
 func checkParseStream(data []byte, checkSeries func(tss []prompb.TimeSeries, mms []prompb.MetricMetadata) error) error {

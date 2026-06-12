@@ -622,11 +622,12 @@ func (c *vmselectClient) APIV1AdminTenants(t *testing.T, opts QueryOpts) *AdminT
 }
 
 type vminsertClient struct {
-	cli                *Client
-	url                func(op, path string, opts QueryOpts) string
-	openTSDBURL        func(op, path string, opts QueryOpts) string
-	graphiteListenAddr string
-	sendBlocking       func(t *testing.T, numRecordsToSend int, send func())
+	cli                 *Client
+	url                 func(op, path string, opts QueryOpts) string
+	openTSDBURL         func(op, path string, opts QueryOpts) string
+	otlpGRPCMetricsAddr string
+	graphiteListenAddr  string
+	sendBlocking        func(t *testing.T, numRecordsToSend int, send func())
 }
 
 // PrometheusAPIV1ImportCSV is a test helper function that inserts a collection
@@ -784,17 +785,7 @@ func (c *vminsertClient) InfluxWrite(t *testing.T, records []string, opts QueryO
 func (c *vminsertClient) OpentelemetryV1Metrics(t *testing.T, md otlppb.MetricsData, opts QueryOpts) {
 	t.Helper()
 
-	var recordsCount int
-	for _, rss := range md.ResourceMetrics {
-		for _, sm := range rss.ScopeMetrics {
-			recordsCount += len(sm.Metrics)
-			for _, m := range sm.Metrics {
-				if prommetadata.IsEnabled() {
-					recordsCount += len(m.Metadata)
-				}
-			}
-		}
-	}
+	recordsCount := opentelemetryRecordsCount(md)
 	url := c.url("insert", "opentelemetry/v1/metrics", opts)
 	uv := opts.asURLValues()
 	uvs := uv.Encode()
@@ -810,6 +801,12 @@ func (c *vminsertClient) OpentelemetryV1Metrics(t *testing.T, md otlppb.MetricsD
 			t.Fatalf("unexpected status code: got %d, want %d", statusCode, http.StatusOK)
 		}
 	})
+}
+
+// OpentelemetryGRPCMetrics inserts records in OpenTelemetry protocol format over OTLP/gRPC.
+func (c *vminsertClient) OpentelemetryGRPCMetrics(t *testing.T, md otlppb.MetricsData, opts QueryOpts) {
+	t.Helper()
+	sendOpentelemetryGRPCMetrics(t, c.otlpGRPCMetricsAddr, c.sendBlocking, md, opts)
 }
 
 // OpenTSDBAPIPut is a test helper function that inserts a collection of

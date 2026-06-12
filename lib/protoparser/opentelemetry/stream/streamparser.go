@@ -11,6 +11,7 @@ import (
 	"github.com/VictoriaMetrics/VictoriaMetrics/lib/bytesutil"
 	"github.com/VictoriaMetrics/VictoriaMetrics/lib/decimal"
 	"github.com/VictoriaMetrics/VictoriaMetrics/lib/flagutil"
+	vmenvgrpc "github.com/VictoriaMetrics/VictoriaMetrics/lib/grpc"
 	"github.com/VictoriaMetrics/VictoriaMetrics/lib/logger"
 	"github.com/VictoriaMetrics/VictoriaMetrics/lib/prompb"
 	"github.com/VictoriaMetrics/VictoriaMetrics/lib/promutil"
@@ -67,6 +68,34 @@ func ParseStream(r io.Reader, encoding string, processBody func(data []byte) ([]
 	})
 	if err != nil {
 		return fmt.Errorf("cannot decode OpenTelemetry protocol data: %w", err)
+	}
+	return nil
+}
+
+// ParseGRPCStream parses an OpenTelemetry gRPC unary request body and calls callback for the parsed rows.
+func ParseGRPCStream(r io.Reader, encoding string, callback func(tss []prompb.TimeSeries, mms []prompb.MetricMetadata) error) error {
+	var header [vmenvgrpc.MessageHeaderSize]byte
+	if _, err := io.ReadFull(r, header[:]); err != nil {
+		return fmt.Errorf("cannot read gRPC message header: %w", err)
+	}
+	messageLength, compressed, err := vmenvgrpc.ParseMessageHeader(header[:])
+	if err != nil {
+		return err
+	}
+	if !compressed {
+		encoding = ""
+	} else if encoding == "" {
+		return fmt.Errorf("missing grpc-encoding header for compressed gRPC message")
+	}
+	lr := &io.LimitedReader{
+		R: r,
+		N: int64(messageLength),
+	}
+	if err := ParseStream(lr, encoding, nil, callback); err != nil {
+		return err
+	}
+	if lr.N != 0 {
+		return fmt.Errorf("invalid gRPC message length: %d, actual length: %d", messageLength, int64(messageLength)-lr.N)
 	}
 	return nil
 }
