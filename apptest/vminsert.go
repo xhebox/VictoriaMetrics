@@ -27,11 +27,16 @@ func storageNodes(flags []string) []string {
 // variable. If the variable is not set, ../../bin/vminsert-race will be
 // used.
 func StartVminsert(instance string, flags []string, cli *Client, output io.Writer) (*Vminsert, error) {
+	otlpGRPCListenAddrIdx := -1
 	extractREs := []*regexp.Regexp{
 		httpListenAddrRE,
 		vminsertClusterNativeAddrRE,
 		graphiteListenAddrRE,
 		openTSDBListenAddrRE,
+	}
+	if hasNonEmptyFlagValue(flags, "-otlpGRPCListenAddr") {
+		otlpGRPCListenAddrIdx = len(extractREs)
+		extractREs = append(extractREs, otlpGRPCListenAddrRE)
 	}
 	// Add storageNode REs to block until vminsert establishes connections with
 	// all storage nodes. The extracted values are unused.
@@ -59,11 +64,16 @@ func StartVminsert(instance string, flags []string, cli *Client, output io.Write
 		return nil, err
 	}
 
+	otlpGRPCMetricsAddr := ""
+	if otlpGRPCListenAddrIdx >= 0 {
+		otlpGRPCMetricsAddr = stderrExtracts[otlpGRPCListenAddrIdx]
+	}
 	return newVminsert(app, cli, vminsertRuntimeValues{
 		httpListenAddr:          stderrExtracts[0],
 		clusternativeListenAddr: stderrExtracts[1],
 		graphiteListenAddr:      stderrExtracts[2],
 		openTSDBListenAddr:      stderrExtracts[3],
+		otlpGRPCMetricsAddr:     otlpGRPCMetricsAddr,
 	}), nil
 }
 
@@ -72,6 +82,7 @@ type vminsertRuntimeValues struct {
 	clusternativeListenAddr string
 	graphiteListenAddr      string
 	openTSDBListenAddr      string
+	otlpGRPCMetricsAddr     string
 }
 
 func newVminsert(app *app, cli *Client, rt vminsertRuntimeValues) *Vminsert {
@@ -85,6 +96,7 @@ func newVminsert(app *app, cli *Client, rt vminsertRuntimeValues) *Vminsert {
 			return getClusterPath(rt.openTSDBListenAddr, op, path, opts)
 		},
 		graphiteListenAddr: rt.graphiteListenAddr,
+		otlpGRPCMetricsURL: getOTLPGRPCMetricsURL(rt.otlpGRPCMetricsAddr),
 		sendBlocking: func(t *testing.T, numRecordsToSend int, send func()) {
 			t.Helper()
 			sendBlocking(t, metricsClient, numRecordsToSend, send)

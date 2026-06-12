@@ -22,14 +22,23 @@ import (
 
 // Client is used for interacting with the apps over the network.
 type Client struct {
-	httpCli *http.Client
+	httpCli  *http.Client
+	http2Cli *http.Client
 }
 
 // NewClient creates a new client.
 func NewClient() *Client {
+	protocols := &http.Protocols{}
+	protocols.SetUnencryptedHTTP2(true)
 	return &Client{
 		httpCli: &http.Client{
 			Transport: httputil.NewTransport(false, "apptest_client"),
+		},
+		http2Cli: &http.Client{
+			Transport: &http.Transport{
+				ForceAttemptHTTP2: true,
+				Protocols:         protocols,
+			},
 		},
 	}
 }
@@ -37,6 +46,7 @@ func NewClient() *Client {
 // CloseConnections closes client connections.
 func (c *Client) CloseConnections() {
 	c.httpCli.CloseIdleConnections()
+	c.http2Cli.CloseIdleConnections()
 }
 
 // Get sends an HTTP GET request, returns
@@ -51,6 +61,29 @@ func (c *Client) Get(t *testing.T, url string, headers http.Header) (string, int
 func (c *Client) Post(t *testing.T, url string, data []byte, headers http.Header) (string, int) {
 	t.Helper()
 	return c.do(t, http.MethodPost, url, data, headers)
+}
+
+// PostHTTP2 sends an HTTP/2 POST request, returning response body, status code, headers and trailers.
+func (c *Client) PostHTTP2(t *testing.T, url string, data []byte, headers http.Header) ([]byte, int, http.Header, http.Header) {
+	t.Helper()
+	req, err := http.NewRequest(http.MethodPost, url, bytes.NewReader(data))
+	if err != nil {
+		t.Fatalf("could not create a HTTP/2 request: %v", err)
+	}
+	req.Header = headers
+	resp, err := c.http2Cli.Do(req)
+	if err != nil {
+		t.Fatalf("could not send HTTP/2 request: %v", err)
+	}
+	if resp.ProtoMajor != 2 {
+		t.Fatalf("unexpected response protocol; got %s; want HTTP/2", resp.Proto)
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("could not read HTTP/2 response body: %v", err)
+	}
+	return body, resp.StatusCode, resp.Header, resp.Trailer
 }
 
 // PostForm sends an HTTP POST request containing the POST-form data with attached getHeaders, returns
@@ -625,6 +658,7 @@ type vminsertClient struct {
 	cli                *Client
 	url                func(op, path string, opts QueryOpts) string
 	openTSDBURL        func(op, path string, opts QueryOpts) string
+	otlpGRPCMetricsURL string
 	graphiteListenAddr string
 	sendBlocking       func(t *testing.T, numRecordsToSend int, send func())
 }
@@ -784,17 +818,7 @@ func (c *vminsertClient) InfluxWrite(t *testing.T, records []string, opts QueryO
 func (c *vminsertClient) OpentelemetryV1Metrics(t *testing.T, md otlppb.MetricsData, opts QueryOpts) {
 	t.Helper()
 
-	var recordsCount int
-	for _, rss := range md.ResourceMetrics {
-		for _, sm := range rss.ScopeMetrics {
-			recordsCount += len(sm.Metrics)
-			for _, m := range sm.Metrics {
-				if prommetadata.IsEnabled() {
-					recordsCount += len(m.Metadata)
-				}
-			}
-		}
-	}
+	recordsCount := opentelemetryRecordsCount(md)
 	url := c.url("insert", "opentelemetry/v1/metrics", opts)
 	uv := opts.asURLValues()
 	uvs := uv.Encode()
@@ -810,6 +834,12 @@ func (c *vminsertClient) OpentelemetryV1Metrics(t *testing.T, md otlppb.MetricsD
 			t.Fatalf("unexpected status code: got %d, want %d", statusCode, http.StatusOK)
 		}
 	})
+}
+
+// OpentelemetryGRPCMetrics inserts records in OpenTelemetry protocol format over OTLP/gRPC.
+func (c *vminsertClient) OpentelemetryGRPCMetrics(t *testing.T, md otlppb.MetricsData, opts QueryOpts) {
+	t.Helper()
+	sendOpentelemetryGRPCMetrics(t, c.cli, c.otlpGRPCMetricsURL, c.sendBlocking, md, opts)
 }
 
 // OpenTSDBAPIPut is a test helper function that inserts a collection of

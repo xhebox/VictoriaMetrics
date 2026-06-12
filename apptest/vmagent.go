@@ -13,6 +13,7 @@ import (
 
 	"github.com/VictoriaMetrics/VictoriaMetrics/lib/prommetadata"
 	"github.com/VictoriaMetrics/VictoriaMetrics/lib/prompb"
+	otlppb "github.com/VictoriaMetrics/VictoriaMetrics/lib/protoparser/opentelemetry/pb"
 	"github.com/golang/snappy"
 )
 
@@ -26,36 +27,47 @@ func StartVmagent(instance string, flags []string, cli *Client, promScrapeConfig
 	if binary == "" {
 		binary = "../../bin/vmagent-race"
 	}
+	extractREs := []*regexp.Regexp{httpListenAddrRE}
+	otlpGRPCListenAddrIdx := -1
+	if hasNonEmptyFlagValue(flags, "-otlpGRPCListenAddr") {
+		otlpGRPCListenAddrIdx = len(extractREs)
+		extractREs = append(extractREs, otlpGRPCListenAddrRE)
+	}
 	app, stderrExtracts, err := startApp(instance, binary, flags, &appOptions{
 		defaultFlags: map[string]string{
 			"-httpListenAddr":          "127.0.0.1:0",
 			"-promscrape.config":       promScrapeConfigFilePath,
 			"-remoteWrite.tmpDataPath": fmt.Sprintf("%s/%s-%d", os.TempDir(), instance, time.Now().UnixNano()),
 		},
-		extractREs: []*regexp.Regexp{
-			httpListenAddrRE,
-		},
-		output: output,
+		extractREs: extractREs,
+		output:     output,
 	})
 	if err != nil {
 		return nil, err
 	}
+	otlpGRPCMetricsAddr := ""
+	if otlpGRPCListenAddrIdx >= 0 {
+		otlpGRPCMetricsAddr = stderrExtracts[otlpGRPCListenAddrIdx]
+	}
 
 	return newVmagent(app, cli, vmagentRuntimeValues{
-		httpListenAddr: stderrExtracts[0],
+		httpListenAddr:      stderrExtracts[0],
+		otlpGRPCMetricsAddr: otlpGRPCMetricsAddr,
 	}), nil
 }
 
 type vmagentRuntimeValues struct {
-	httpListenAddr string
+	httpListenAddr      string
+	otlpGRPCMetricsAddr string
 }
 
 func newVmagent(app *app, cli *Client, rt vmagentRuntimeValues) *Vmagent {
 	return &Vmagent{
-		app:            app,
-		cli:            cli,
-		metricsClient:  newMetricsClient(cli, rt.httpListenAddr),
-		httpListenAddr: rt.httpListenAddr,
+		app:                app,
+		cli:                cli,
+		metricsClient:      newMetricsClient(cli, rt.httpListenAddr),
+		httpListenAddr:     rt.httpListenAddr,
+		otlpGRPCMetricsURL: getOTLPGRPCMetricsURL(rt.otlpGRPCMetricsAddr),
 	}
 }
 
@@ -65,14 +77,21 @@ type Vmagent struct {
 	*app
 	*metricsClient
 
-	cli            *Client
-	httpListenAddr string
+	cli                *Client
+	httpListenAddr     string
+	otlpGRPCMetricsURL string
 }
 
 // HTTPAddr returns the address at which the vmagent process is listening
 // for http connections.
 func (app *Vmagent) HTTPAddr() string {
 	return app.httpListenAddr
+}
+
+// OpentelemetryGRPCMetrics inserts records in OpenTelemetry protocol format over OTLP/gRPC.
+func (app *Vmagent) OpentelemetryGRPCMetrics(t *testing.T, md otlppb.MetricsData, opts QueryOpts) {
+	t.Helper()
+	sendOpentelemetryGRPCMetrics(t, app.cli, app.otlpGRPCMetricsURL, app.sendBlocking, md, opts)
 }
 
 // APIV1ImportPrometheus is a test helper function that inserts a

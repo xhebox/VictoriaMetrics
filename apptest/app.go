@@ -17,6 +17,7 @@ import (
 var (
 	storageDataPathRE           = regexp.MustCompile(`successfully opened storage "(.*)"`)
 	httpListenAddrRE            = regexp.MustCompile(`started server at http://(.*:\d{1,5})/`)
+	otlpGRPCListenAddrRE        = regexp.MustCompile(`started http/2 server at http2://(.*:\d{1,5})/`)
 	graphiteListenAddrRE        = regexp.MustCompile(`started TCP Graphite server at "(.*:\d{1,5})"`)
 	openTSDBListenAddrRE        = regexp.MustCompile(`started TCP OpenTSDB collector at "(.*:\d{1,5})"`)
 	vminsertAddrRE              = regexp.MustCompile(`accepting vminsert conns at (.*:\d{1,5})$`)
@@ -109,6 +110,19 @@ func startApp(instance string, binary string, flags []string, opts *appOptions) 
 	}
 
 	return app, extracts, err
+}
+
+func hasNonEmptyFlagValue(flags []string, name string) bool {
+	for _, flag := range flags {
+		if flag == name {
+			return true
+		}
+		prefix := name + "="
+		if strings.HasPrefix(flag, prefix) {
+			return strings.TrimPrefix(flag, prefix) != ""
+		}
+	}
+	return false
 }
 
 // setDefaultFlags adds flags with default values to `flags` if it does not

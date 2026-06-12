@@ -30,6 +30,20 @@ func Init() {
 	stream.InitDecodeOptions()
 }
 
+const GRPCMetricsServicePath = "/opentelemetry.proto.collector.metrics.v1.MetricsService/Export"
+
+// InsertHandlerForGRPC processes opentelemetry metrics from OTLP/gRPC requests.
+func InsertHandlerForGRPC(at *auth.Token, req *http.Request) error {
+	extraLabels, err := protoparserutil.GetExtraLabels(req)
+	if err != nil {
+		return err
+	}
+	encoding := req.Header.Get("grpc-encoding")
+	return stream.ParseGRPCStream(req.Body, encoding, func(tss []prompb.TimeSeries, mms []prompb.MetricMetadata) error {
+		return insertRows(at, tss, mms, extraLabels)
+	})
+}
+
 // InsertHandlerForReader processes metrics from given reader.
 func InsertHandlerForReader(at *auth.Token, r io.Reader, encoding string) error {
 	return stream.ParseStream(r, encoding, nil, func(tss []prompb.TimeSeries, mms []prompb.MetricMetadata) error {

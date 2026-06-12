@@ -1,6 +1,7 @@
 package main
 
 import (
+	"crypto/tls"
 	"embed"
 	"flag"
 	"fmt"
@@ -34,6 +35,8 @@ import (
 	"github.com/VictoriaMetrics/VictoriaMetrics/lib/cgroup"
 	"github.com/VictoriaMetrics/VictoriaMetrics/lib/envflag"
 	"github.com/VictoriaMetrics/VictoriaMetrics/lib/flagutil"
+	vmgrpc "github.com/VictoriaMetrics/VictoriaMetrics/lib/grpc"
+	http2server "github.com/VictoriaMetrics/VictoriaMetrics/lib/http2server"
 	"github.com/VictoriaMetrics/VictoriaMetrics/lib/httpserver"
 	"github.com/VictoriaMetrics/VictoriaMetrics/lib/influxutil"
 	graphiteserver "github.com/VictoriaMetrics/VictoriaMetrics/lib/ingestserver/graphite"
@@ -75,9 +78,19 @@ var (
 		"See also -opentsdbHTTPListenAddr.useProxyProtocol")
 	opentsdbHTTPUseProxyProtocol = flag.Bool("opentsdbHTTPListenAddr.useProxyProtocol", false, "Whether to use proxy protocol for connections accepted "+
 		"at -opentsdbHTTPListenAddr . See https://www.haproxy.org/download/1.8/doc/proxy-protocol.txt")
-	configAuthKey = flagutil.NewPassword("configAuthKey", "Authorization key for accessing /config and /remotewrite-.*-config pages. It must be passed via authKey query arg. It overrides -httpAuth.*")
-	reloadAuthKey = flagutil.NewPassword("reloadAuthKey", "Auth key for /-/reload http endpoint. It must be passed via authKey query arg. It overrides -httpAuth.*")
-	dryRun        = flag.Bool("dryRun", false, "Whether to check config files without running vmagent. The following files are checked: "+
+	otlpGRPClistenAddr = flag.String("otlpGRPCListenAddr", "", "TCP address to listen for OpenTelemetry metrics over gRPC. Usually :4317 must be set. Doesn't work if empty. "+
+		"See also -otlpGRPC.tls")
+	otlpGRPCtls = flag.Bool("otlpGRPC.tls", false, "Whether to enable TLS for incoming OTLP/gRPC requests at -otlpGRPCListenAddr. "+
+		"-otlpGRPC.tlsCertFile and -otlpGRPC.tlsKeyFile must be set if -otlpGRPC.tls is set")
+	otlpGRPCtlsCertFile = flag.String("otlpGRPC.tlsCertFile", "", "Path to file with TLS certificate for OTLP/gRPC server if -otlpGRPC.tls is set. "+
+		"Prefer ECDSA certs instead of RSA certs as RSA certs are slower. The provided certificate file is automatically re-read every second")
+	otlpGRPCtlsKeyFile = flag.String("otlpGRPC.tlsKeyFile", "", "Path to file with TLS key for OTLP/gRPC server if -otlpGRPC.tls is set. "+
+		"The provided key file is automatically re-read every second")
+	otlpGRPCtlsCipherSuites = flagutil.NewArrayString("otlpGRPC.tlsCipherSuites", "Optional list of TLS cipher suites for OTLP/gRPC server if -otlpGRPC.tls is set. See the list of supported cipher suites at https://pkg.go.dev/crypto/tls#pkg-constants")
+	otlpGRPCtlsMinVersion   = flag.String("otlpGRPC.tlsMinVersion", "", "Optional minimum TLS version to use for OTLP/gRPC server if -otlpGRPC.tls is set. Supported values: TLS10, TLS11, TLS12, TLS13")
+	configAuthKey           = flagutil.NewPassword("configAuthKey", "Authorization key for accessing /config and /remotewrite-.*-config pages. It must be passed via authKey query arg. It overrides -httpAuth.*")
+	reloadAuthKey           = flagutil.NewPassword("reloadAuthKey", "Auth key for /-/reload http endpoint. It must be passed via authKey query arg. It overrides -httpAuth.*")
+	dryRun                  = flag.Bool("dryRun", false, "Whether to check config files without running vmagent. The following files are checked: "+
 		"-promscrape.config, -remoteWrite.relabelConfig, -remoteWrite.urlRelabelConfig, -remoteWrite.streamAggr.config . "+
 		"Unknown config entries aren't allowed in -promscrape.config by default. This can be changed by passing -promscrape.config.strictParse=false command-line flag")
 	maxLabelsPerTimeseries = flag.Int("maxLabelsPerTimeseries", 0, "The maximum number of labels per time series to be accepted. Series with superfluous labels are ignored. In this case the vm_rows_ignored_total{reason=\"too_many_labels\"} metric at /metrics page is incremented")
@@ -167,6 +180,17 @@ func main() {
 		httpInsertHandler := getOpenTSDBHTTPInsertHandler()
 		opentsdbhttpServer = opentsdbhttpserver.MustStart(*opentsdbHTTPListenAddr, *opentsdbHTTPUseProxyProtocol, httpInsertHandler)
 	}
+	if len(*otlpGRPClistenAddr) > 0 {
+		var tlsConfig *tls.Config
+		if *otlpGRPCtls {
+			var err error
+			tlsConfig, err = http2server.NewTLSConfig(*otlpGRPCtlsCertFile, *otlpGRPCtlsKeyFile, *otlpGRPCtlsMinVersion, *otlpGRPCtlsCipherSuites)
+			if err != nil {
+				logger.Fatalf("cannot load TLS cert from -otlpGRPC.tlsCertFile=%q, -otlpGRPC.tlsKeyFile=%q, -otlpGRPC.tlsMinVersion=%q, -otlpGRPC.tlsCipherSuites=%q: %s", *otlpGRPCtlsCertFile, *otlpGRPCtlsKeyFile, *otlpGRPCtlsMinVersion, *otlpGRPCtlsCipherSuites, err)
+			}
+		}
+		http2server.Serve(*otlpGRPClistenAddr, otlpGRPCRequestHandler, tlsConfig)
+	}
 
 	promscrape.Init(remotewrite.PushDropSamplesOnFailure)
 
@@ -202,10 +226,35 @@ func main() {
 	if len(*opentsdbHTTPListenAddr) > 0 {
 		opentsdbhttpServer.MustStop()
 	}
+	if len(*otlpGRPClistenAddr) > 0 {
+		if err := http2server.Stop([]string{*otlpGRPClistenAddr}); err != nil {
+			logger.Fatalf("cannot stop OTLP/gRPC server: %s", err)
+		}
+	}
 	protoparserutil.StopUnmarshalWorkers()
 	remotewrite.Stop()
 
 	logger.Infof("successfully stopped vmagent in %.3f seconds", time.Since(startTime).Seconds())
+}
+
+func otlpGRPCRequestHandler(w http.ResponseWriter, r *http.Request) bool {
+	path := strings.ReplaceAll(r.URL.Path, "//", "/")
+	switch path {
+	case opentelemetry.GRPCMetricsServicePath:
+		opentelemetryGRPCPushRequests.Inc()
+		if err := opentelemetry.InsertHandlerForGRPC(nil, r); err != nil {
+			opentelemetryGRPCPushErrors.Inc()
+			vmgrpc.WriteErrorGrpcResponse(w, vmgrpc.StatusCodeInternal, err.Error())
+			return true
+		}
+		if _, err := vmgrpc.WriteResponse(w, nil); err != nil {
+			logger.Errorf("error writing OTLP/gRPC response body: %s", err)
+		}
+		return true
+	default:
+		vmgrpc.WriteErrorGrpcResponse(w, vmgrpc.StatusCodeUnimplemented, fmt.Sprintf("gRPC method not found: %s", r.URL.Path))
+		return true
+	}
 }
 
 func getOpenTSDBHTTPInsertHandler() func(req *http.Request) error {
@@ -798,8 +847,10 @@ var (
 	datadogIntakeRequests   = metrics.NewCounter(`vmagent_http_requests_total{path="/datadog/intake", protocol="datadog"}`)
 	datadogMetadataRequests = metrics.NewCounter(`vmagent_http_requests_total{path="/datadog/api/v1/metadata", protocol="datadog"}`)
 
-	opentelemetryPushRequests = metrics.NewCounter(`vmagent_http_requests_total{path="/opentelemetry/v1/metrics", protocol="opentelemetry"}`)
-	opentelemetryPushErrors   = metrics.NewCounter(`vmagent_http_request_errors_total{path="/opentelemetry/v1/metrics", protocol="opentelemetry"}`)
+	opentelemetryPushRequests     = metrics.NewCounter(`vmagent_http_requests_total{path="/opentelemetry/v1/metrics", protocol="opentelemetry"}`)
+	opentelemetryPushErrors       = metrics.NewCounter(`vmagent_http_request_errors_total{path="/opentelemetry/v1/metrics", protocol="opentelemetry"}`)
+	opentelemetryGRPCPushRequests = metrics.NewCounter(`vmagent_http_requests_total{path="/opentelemetry.proto.collector.metrics.v1.MetricsService/Export", protocol="opentelemetrygrpc"}`)
+	opentelemetryGRPCPushErrors   = metrics.NewCounter(`vmagent_http_request_errors_total{path="/opentelemetry.proto.collector.metrics.v1.MetricsService/Export", protocol="opentelemetrygrpc"}`)
 
 	zabbixconnectorHistoryRequests = metrics.NewCounter(`vmagent_http_requests_total{path="/zabbixconnector/api/v1/history", protocol="zabbixconnector"}`)
 	zabbixconnectorHistoryErrors   = metrics.NewCounter(`vmagent_http_request_errors_total{path="/zabbixconnector/api/v1/history", protocol="zabbixconnector"}`)
